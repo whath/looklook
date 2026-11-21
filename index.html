@@ -32,21 +32,14 @@
           </form>
         </section>
 
-        <section class="categories" aria-label="分类行情">
+        <nav class="categories" aria-labelledby="category-label">
           <div class="categories-heading">
             <span id="category-label">分类<span class="categories-caption"> · 平均涨幅</span></span>
-            <select id="category-select" aria-label="跳转分类"></select>
           </div>
-          <div id="quote-tabs" class="tab-list" role="tablist" aria-labelledby="category-label"></div>
-        </section>
+          <div id="quote-tabs" class="tab-list"></div>
+        </nav>
 
-        <section id="stock-panel" class="stock-panel" role="tabpanel" tabindex="0" aria-label="个股涨幅">
-          <div class="stock-list-header">
-            <h2 id="group-name"></h2>
-            <span>日涨跌幅</span>
-          </div>
-          <div id="stock-list" class="stock-list" role="list" aria-label="当前分类标的" tabindex="0"></div>
-        </section>
+        <section id="stock-grid" class="stock-grid" tabindex="0" aria-label="按分类查看个股日涨跌幅"></section>
 
         <footer class="status" aria-live="polite">
           <span class="status-mark" aria-hidden="true"></span>

@@ -37,9 +37,7 @@ const titleButton = el('edit-title');
 const titleForm = el('title-form');
 const titleInput = el('title-input');
 const tabs = el('quote-tabs');
-const categorySelect = el('category-select');
-const stockPanel = el('stock-panel');
-const stockList = el('stock-list');
+const stockGrid = el('stock-grid');
 const statusText = el('status-text');
 const retryButton = el('retry-quotes');
 const settingsDialog = el('settings-dialog');
@@ -113,7 +111,7 @@ let refreshing = false;
 let failure = '';
 let intervalHandle;
 let lastRequestAt = 0;
-const tabElements = new Map();
+const groupElements = new Map();
 
 function formatChange(value) {
   return Number.isFinite(value) ? percentFormatter.format(value / 100) : '—';
@@ -161,35 +159,56 @@ function categoryAverage(group) {
   return { value: count ? total / count : null, count };
 }
 
-function buildCategories() {
-  const jumpPrompt = new Option('跳转分类', '');
-  jumpPrompt.disabled = true;
-  jumpPrompt.selected = true;
-  categorySelect.append(jumpPrompt);
-
-  let optionCategory;
-  let options;
+function buildWatchlist() {
   watchlist.groups.forEach((group, index) => {
-    if (optionCategory !== group.category) {
-      optionCategory = group.category;
-      options = document.createElement('optgroup');
-      options.label = optionCategory;
-      categorySelect.append(options);
-    }
-    options.append(new Option(group.name, group.id));
+    const card = document.createElement('section');
+    card.id = `group-${group.id}`;
+    card.className = 'stock-card';
+    const header = document.createElement('header');
+    header.className = 'stock-list-header';
+    const heading = document.createElement('h2');
+    heading.id = `heading-${group.id}`;
+    heading.textContent = group.name;
+    card.setAttribute('aria-labelledby', heading.id);
+    const cardValue = document.createElement('span');
+    cardValue.className = 'card-value';
+    header.append(heading, cardValue);
+
+    const stockList = document.createElement('ul');
+    stockList.className = 'stock-list';
+    const stockValues = group.stocks.map((stock) => {
+      const row = document.createElement('li');
+      row.className = 'stock-row';
+      const identity = document.createElement('span');
+      identity.className = 'stock-identity';
+      const name = document.createElement('span');
+      name.className = 'stock-name';
+      name.textContent = stock.name;
+      const code = document.createElement('span');
+      code.className = 'stock-code';
+      code.textContent = stock.code;
+      identity.append(name, code);
+      const value = document.createElement('span');
+      value.className = 'stock-change';
+      row.append(identity, value);
+      stockList.append(row);
+      return value;
+    });
+    card.append(header, stockList);
+    stockGrid.append(card);
 
     const button = document.createElement('button');
     button.type = 'button';
     button.id = `tab-${group.id}`;
     button.className = 'quote-tab';
-    button.setAttribute('role', 'tab');
-    button.setAttribute('aria-controls', stockPanel.id);
+    button.setAttribute('aria-controls', card.id);
+    if (group === activeGroup) button.setAttribute('aria-current', 'location');
 
-    const value = document.createElement('span');
-    value.className = 'tab-value';
+    const tabValue = document.createElement('span');
+    tabValue.className = 'tab-value';
     const name = document.createElement('span');
     name.textContent = group.name;
-    button.append(value, name);
+    button.append(tabValue, name);
     button.addEventListener('click', () => selectGroup(group));
     button.addEventListener('keydown', (event) => {
       const size = watchlist.groups.length;
@@ -202,73 +221,44 @@ function buildCategories() {
       if (targetIndex === undefined) return;
       event.preventDefault();
       const target = watchlist.groups[targetIndex];
+      groupElements.get(target.id).button.focus({ preventScroll: true });
       selectGroup(target);
-      tabElements.get(target.id).button.focus({ preventScroll: true });
     });
-    tabElements.set(group.id, { button, value });
+    groupElements.set(group.id, { button, tabValue, card, cardValue, stockValues });
     tabs.append(button);
-  });
-  categorySelect.addEventListener('change', () => {
-    const group = watchlist.groups.find((entry) => entry.id === categorySelect.value);
-    if (group) selectGroup(group);
-    categorySelect.value = '';
   });
 }
 
-function renderCategories() {
+function renderQuotes() {
   for (const group of watchlist.groups) {
-    const nodes = tabElements.get(group.id);
-    const selected = group.id === activeGroup.id;
+    const { button, tabValue, cardValue, stockValues } = groupElements.get(group.id);
     const average = categoryAverage(group);
     const formatted = formatChange(average.value);
-    nodes.value.textContent = formatted;
+    tabValue.textContent = formatted;
+    cardValue.textContent = formatted;
     const label = `${group.name}，平均涨幅 ${formatted}，${average.count}/${group.stocks.length} 只有行情`;
-    nodes.button.title = label;
-    nodes.button.setAttribute('aria-label', label);
-    nodes.button.setAttribute('aria-selected', String(selected));
-    nodes.button.tabIndex = selected ? 0 : -1;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+
+    group.stocks.forEach((stock, index) => {
+      const change = changes.get(stock.code);
+      const node = stockValues[index];
+      const missing = !Number.isFinite(change);
+      node.textContent = formatChange(change);
+      node.classList.toggle('missing', missing);
+      if (missing) node.title = '暂无有效报价';
+      else node.removeAttribute('title');
+    });
   }
-  stockPanel.setAttribute('aria-labelledby', `tab-${activeGroup.id}`);
 }
 
 function selectGroup(group) {
+  const { button, card } = groupElements.get(group.id);
+  groupElements.get(activeGroup.id).button.removeAttribute('aria-current');
   activeGroup = group;
   writePreference(groupKey, group.id);
-  renderCategories();
-  renderStocks();
-  stockList.scrollTop = 0;
-  tabElements.get(group.id).button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-}
-
-function renderStocks() {
-  el('group-name').textContent = activeGroup.name;
-  const contents = document.createDocumentFragment();
-  for (const stock of activeGroup.stocks) {
-    const row = document.createElement('div');
-    row.className = 'stock-row';
-    row.setAttribute('role', 'listitem');
-    const identity = document.createElement('div');
-    identity.className = 'stock-identity';
-    const name = document.createElement('span');
-    name.className = 'stock-name';
-    name.textContent = stock.name;
-    const code = document.createElement('span');
-    code.className = 'stock-code';
-    code.textContent = stock.code;
-    identity.append(name, code);
-
-    const change = document.createElement('span');
-    change.className = 'stock-change';
-    const value = changes.get(stock.code);
-    change.textContent = formatChange(value);
-    if (!Number.isFinite(value)) {
-      change.classList.add('missing');
-      change.title = '暂无有效报价';
-    }
-    row.append(identity, change);
-    contents.append(row);
-  }
-  stockList.replaceChildren(contents);
+  button.setAttribute('aria-current', 'location');
+  card.scrollIntoView({ block: 'start', inline: 'nearest' });
 }
 
 function marketDate(timestamp) {
@@ -344,8 +334,7 @@ async function refreshQuotes() {
     activeSnapshot = snapshot.data;
     changes = snapshot.values;
     failure = '';
-    renderCategories();
-    renderStocks();
+    renderQuotes();
   } catch (error) {
     if (revision !== connectionRevision) return;
     const message = String(error);
@@ -409,8 +398,7 @@ el('settings-form').addEventListener('submit', (event) => {
     activeSnapshot = null;
     changes = new Map();
     failure = '';
-    renderCategories();
-    renderStocks();
+    renderQuotes();
   }
   startPolling();
 });
@@ -425,8 +413,9 @@ if (isTauri()) {
 }
 
 renderTitle();
-buildCategories();
-renderCategories();
-renderStocks();
-tabElements.get(activeGroup.id).button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+buildWatchlist();
+renderQuotes();
+if (activeGroup !== watchlist.groups[0]) {
+  groupElements.get(activeGroup.id).card.scrollIntoView({ block: 'start', inline: 'nearest' });
+}
 startPolling();
