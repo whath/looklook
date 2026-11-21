@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>looklook</title>
+  </head>
+  <body>
+    <div class="window-shell">
+      <header class="titlebar" data-tauri-drag-region>
+        <span class="app-name" data-tauri-drag-region>looklook</span>
+        <div class="drag-space" data-tauri-drag-region></div>
+        <button id="open-settings" class="settings-button" type="button">设置</button>
+        <div class="window-actions">
+          <button id="minimize-window" class="window-button" type="button" aria-label="最小化" title="最小化">
+            <span class="minimize-icon" aria-hidden="true"></span>
+          </button>
+          <button id="close-window" class="window-button" type="button" aria-label="关闭" title="关闭">
+            <span class="close-icon" aria-hidden="true"></span>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="heading" aria-label="自定义标题">
+          <h1><button id="edit-title" class="heading-button" type="button" title="编辑标题"></button></h1>
+          <form id="title-form" class="title-form" hidden>
+            <input id="title-input" aria-label="自定义标题" maxlength="60" required />
+            <button type="submit">保存</button>
+            <button id="cancel-title" type="button">取消</button>
+          </form>
+        </section>
+
+        <section class="categories" aria-label="分类行情">
+          <div class="categories-heading">
+            <span id="category-label">分类<span class="categories-caption"> · 平均涨幅</span></span>
+            <select id="category-select" aria-label="跳转分类"></select>
+          </div>
+          <div id="quote-tabs" class="tab-list" role="tablist" aria-labelledby="category-label"></div>
+        </section>
+
+        <section id="stock-panel" class="stock-panel" role="tabpanel" tabindex="0" aria-label="个股涨幅">
+          <div class="stock-list-header">
+            <h2 id="group-name"></h2>
+            <span>日涨跌幅</span>
+          </div>
+          <div id="stock-list" class="stock-list" role="list" aria-label="当前分类标的" tabindex="0"></div>
+        </section>
+
+        <footer class="status" aria-live="polite">
+          <span class="status-mark" aria-hidden="true"></span>
+          <span id="status-text"></span>
+          <button id="retry-quotes" type="button" hidden>重试</button>
+        </footer>
+      </main>
+    </div>
+
+    <dialog id="settings-dialog" aria-labelledby="settings-heading">
+      <form id="settings-form">
+        <header class="dialog-heading"><h2 id="settings-heading">连接设置</h2></header>
+        <label for="server-endpoint">行情接口</label>
+        <input id="server-endpoint" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://ericcself.top/v1/looklook/quotes" aria-describedby="endpoint-hint" required />
+        <p id="endpoint-hint" class="dialog-hint">可填写服务器域名或完整接口地址。</p>
+        <label for="server-token">访问令牌 <span class="optional" id="token-hint"></span></label>
+        <input id="server-token" type="password" autocomplete="off" spellcheck="false" maxlength="4096" />
+        <p id="settings-error" class="settings-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="cancel-settings" type="button">取消</button>
+          <button class="primary-button" type="submit">保存并连接</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
