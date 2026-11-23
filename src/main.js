@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import watchlist from '../shared/watchlist.json';
+import { rankGroups, advanceRankHistory, rankMovement } from './ranking.js';
 import './styles.css';
 
 const refreshInterval = 15 * 60 * 1000;
@@ -12,6 +13,7 @@ const productionOrigin = new URL(productionEndpoint).origin;
 const settingsKey = 'looklook.connection';
 const titleKey = 'looklook.title';
 const groupKey = 'looklook.active-group';
+const rankHistoryKey = 'looklook.rank-history';
 
 const percentFormatter = new Intl.NumberFormat('zh-CN', {
   style: 'percent',
@@ -38,6 +40,7 @@ const titleForm = el('title-form');
 const titleInput = el('title-input');
 const tabs = el('quote-tabs');
 const stockGrid = el('stock-grid');
+const lastRefresh = el('last-refresh');
 const statusText = el('status-text');
 const retryButton = el('retry-quotes');
 const settingsDialog = el('settings-dialog');
@@ -101,12 +104,26 @@ function initialConnection() {
   }
 }
 
+function readRankHistory(endpoint) {
+  try {
+    const stored = JSON.parse(readPreference(rankHistoryKey));
+    const history = stored?.history;
+    if (stored?.endpoint === endpoint && Number.isFinite(history?.updatedAt)
+        && history.current && history.previous) return history;
+  } catch {
+    // Start a new comparison history if local data cannot be read.
+  }
+  return null;
+}
+
 let connection = initialConnection();
 let connectionRevision = 0;
+let rankHistory = readRankHistory(connection.endpoint);
 let title = readPreference(titleKey)?.trim().slice(0, 60) || defaultTitle;
 let activeGroup = watchlist.groups.find((group) => group.id === readPreference(groupKey)) || watchlist.groups[0];
 let activeSnapshot = null;
 let changes = new Map();
+let groupOrder = watchlist.groups;
 let refreshing = false;
 let failure = '';
 let intervalHandle;
@@ -147,20 +164,8 @@ titleInput.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') stopEditingTitle();
 });
 
-function categoryAverage(group) {
-  let total = 0;
-  let count = 0;
-  for (const stock of group.stocks) {
-    const change = changes.get(stock.code);
-    if (!Number.isFinite(change)) continue;
-    total += change;
-    count += 1;
-  }
-  return { value: count ? total / count : null, count };
-}
-
 function buildWatchlist() {
-  watchlist.groups.forEach((group, index) => {
+  for (const group of watchlist.groups) {
     const card = document.createElement('section');
     card.id = `group-${group.id}`;
     card.className = 'stock-card';
@@ -172,7 +177,12 @@ function buildWatchlist() {
     card.setAttribute('aria-labelledby', heading.id);
     const cardValue = document.createElement('span');
     cardValue.className = 'card-value';
-    header.append(heading, cardValue);
+    const movement = document.createElement('span');
+    movement.className = 'rank-movement';
+    const metrics = document.createElement('span');
+    metrics.className = 'card-metrics';
+    metrics.append(movement, cardValue);
+    header.append(heading, metrics);
 
     const stockList = document.createElement('ul');
     stockList.className = 'stock-list';
@@ -211,7 +221,8 @@ function buildWatchlist() {
     button.append(tabValue, name);
     button.addEventListener('click', () => selectGroup(group));
     button.addEventListener('keydown', (event) => {
-      const size = watchlist.groups.length;
+      const index = groupOrder.indexOf(group);
+      const size = groupOrder.length;
       const targetIndex = {
         ArrowLeft: (index + size - 1) % size,
         ArrowRight: (index + 1) % size,
@@ -220,23 +231,49 @@ function buildWatchlist() {
       }[event.key];
       if (targetIndex === undefined) return;
       event.preventDefault();
-      const target = watchlist.groups[targetIndex];
+      const target = groupOrder[targetIndex];
       groupElements.get(target.id).button.focus({ preventScroll: true });
       selectGroup(target);
     });
-    groupElements.set(group.id, { button, tabValue, card, cardValue, stockValues });
+    groupElements.set(group.id, { button, tabValue, card, cardValue, movement, stockValues });
     tabs.append(button);
-  });
+  }
 }
 
-function renderQuotes() {
-  for (const group of watchlist.groups) {
-    const { button, tabValue, cardValue, stockValues } = groupElements.get(group.id);
-    const average = categoryAverage(group);
-    const formatted = formatChange(average.value);
+function applyGroupOrder(ranking) {
+  const order = ranking.map(({ group }) => group);
+  if (order.every((group, index) => group === groupOrder[index])) return;
+
+  let anchor;
+  let anchorTop;
+  if (stockGrid.scrollTop > 0) {
+    const viewportTop = stockGrid.getBoundingClientRect().top;
+    anchor = [...stockGrid.children].find((card) => card.getBoundingClientRect().bottom > viewportTop);
+    anchorTop = anchor?.getBoundingClientRect().top;
+  }
+  const focusedTab = tabs.contains(document.activeElement) ? document.activeElement : null;
+  const elements = order.map((group) => groupElements.get(group.id));
+  tabs.append(...elements.map(({ button }) => button));
+  stockGrid.append(...elements.map(({ card }) => card));
+  groupOrder = order;
+  if (anchor) stockGrid.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+  else stockGrid.scrollTop = 0;
+  if (focusedTab && document.activeElement !== focusedTab) focusedTab.focus({ preventScroll: true });
+}
+
+function renderQuotes(ranking = rankGroups(watchlist.groups, changes), history = null) {
+  for (const { group, value, count } of ranking) {
+    const { button, tabValue, cardValue, movement, stockValues } = groupElements.get(group.id);
+    const formatted = formatChange(value);
     tabValue.textContent = formatted;
     cardValue.textContent = formatted;
-    const label = `${group.name}，平均涨幅 ${formatted}，${average.count}/${group.stocks.length} 只有行情`;
+    const delta = rankMovement(history, group.id);
+    movement.textContent = delta === null ? '—' : delta > 0 ? `↑${delta}` : delta < 0 ? `↓${-delta}` : '0';
+    movement.title = delta === null ? '暂无上一轮名次'
+      : delta > 0 ? `较上一轮上升 ${delta} 名`
+        : delta < 0 ? `较上一轮下降 ${-delta} 名` : '与上一轮持平';
+    movement.setAttribute('aria-label', movement.title);
+    const label = `${group.name}，平均涨幅 ${formatted}，${count}/${group.stocks.length} 只有行情`;
     button.title = label;
     button.setAttribute('aria-label', label);
 
@@ -250,6 +287,7 @@ function renderQuotes() {
       else node.removeAttribute('title');
     });
   }
+  applyGroupOrder(ranking);
 }
 
 function selectGroup(group) {
@@ -266,6 +304,23 @@ function marketDate(timestamp) {
   if (!Number.isFinite(date.getTime())) return null;
   const parts = Object.fromEntries(tradeDateFormatter.formatToParts(date).map(({ type, value }) => [type, value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function renderLastRefresh(updatedAt) {
+  const timestamp = typeof updatedAt === 'string' ? Date.parse(updatedAt) : NaN;
+  lastRefresh.hidden = !Number.isFinite(timestamp);
+  if (lastRefresh.hidden) {
+    lastRefresh.removeAttribute('datetime');
+    lastRefresh.removeAttribute('title');
+    lastRefresh.textContent = '';
+    return;
+  }
+  const date = marketDate(timestamp);
+  const time = statusTimeFormatter.format(timestamp);
+  const label = date === marketDate(Date.now()) ? time : `${date.slice(5)} ${time}`;
+  lastRefresh.dateTime = updatedAt;
+  lastRefresh.title = `${date} ${time}（北京时间）`;
+  lastRefresh.textContent = `上次刷新 ${label}`;
 }
 
 function readSnapshot(data) {
@@ -292,15 +347,12 @@ function renderStatus() {
   } else if (!hasData) {
     statusText.textContent = failure || '暂无行情，等待服务器更新';
   } else {
-    const { tradeDate, updatedAt, stale } = activeSnapshot;
+    const { tradeDate, stale } = activeSnapshot;
     const details = [];
     if (failure) details.push('连接失败，保留上次行情');
     else if (stale) details.push('上次行情');
     if (typeof tradeDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(tradeDate)) {
       details.push(`交易日 ${tradeDate.slice(5)}`);
-    }
-    if (updatedAt && Number.isFinite(new Date(updatedAt).getTime())) {
-      details.push(`拉取 ${statusTimeFormatter.format(new Date(updatedAt))}`);
     }
     statusText.textContent = details.join(' · ') || '行情已更新';
   }
@@ -331,10 +383,23 @@ async function refreshQuotes() {
   try {
     const snapshot = readSnapshot(await requestSnapshot(connection));
     if (revision !== connectionRevision) return;
+    const { updatedAt } = snapshot.data;
+    const timestamp = Date.parse(updatedAt);
+    if (changes.size && (!snapshot.values.size || timestamp < Date.parse(activeSnapshot?.updatedAt))) {
+      failure = '服务器暂未提供更新行情';
+      return;
+    }
     activeSnapshot = snapshot.data;
     changes = snapshot.values;
     failure = '';
-    renderQuotes();
+    const ranking = rankGroups(watchlist.groups, changes);
+    const history = advanceRankHistory(rankHistory, updatedAt, ranking);
+    if (history !== rankHistory) {
+      rankHistory = history;
+      writePreference(rankHistoryKey, JSON.stringify({ endpoint: connection.endpoint, history }));
+    }
+    renderLastRefresh(changes.size ? updatedAt : null);
+    renderQuotes(ranking, timestamp === rankHistory?.updatedAt ? rankHistory : null);
   } catch (error) {
     if (revision !== connectionRevision) return;
     const message = String(error);
@@ -389,15 +454,18 @@ el('settings-form').addEventListener('submit', (event) => {
     tokenInput.focus();
     return;
   }
-  const changed = connection.endpoint !== endpoint || connection.token !== token;
+  const endpointChanged = connection.endpoint !== endpoint;
+  const changed = endpointChanged || connection.token !== token;
   connection = { endpoint, token };
   writePreference(settingsKey, JSON.stringify(connection));
   settingsDialog.close();
   if (changed) {
     connectionRevision += 1;
+    if (endpointChanged) rankHistory = readRankHistory(endpoint);
     activeSnapshot = null;
     changes = new Map();
     failure = '';
+    renderLastRefresh(null);
     renderQuotes();
   }
   startPolling();
