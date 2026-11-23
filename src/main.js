@@ -2,9 +2,10 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import watchlist from '../shared/watchlist.json';
 import { rankGroups, advanceRankHistory, rankMovement } from './ranking.js';
+import { refreshSchedule } from './schedule.js';
 import './styles.css';
 
-const refreshInterval = 15 * 60 * 1000;
+const scheduleCheckInterval = 60_000;
 const defaultTitle = '记住来时路，坚定未来路';
 const productionEndpoint = 'https://ericcself.top/v1/looklook/quotes';
 const quotePath = new URL(productionEndpoint).pathname;
@@ -14,6 +15,7 @@ const settingsKey = 'looklook.connection';
 const titleKey = 'looklook.title';
 const groupKey = 'looklook.active-group';
 const rankHistoryKey = 'looklook.rank-history';
+const snapshotKey = 'looklook.last-snapshot';
 
 const percentFormatter = new Intl.NumberFormat('zh-CN', {
   style: 'percent',
@@ -126,8 +128,8 @@ let changes = new Map();
 let groupOrder = watchlist.groups;
 let refreshing = false;
 let failure = '';
-let intervalHandle;
-let lastRequestAt = 0;
+let refreshTimer;
+let lastRequestedSlot;
 const groupElements = new Map();
 
 function formatChange(value) {
@@ -345,7 +347,7 @@ function renderStatus() {
   } else if (refreshing) {
     statusText.textContent = hasData ? '正在更新行情…' : '正在连接服务器…';
   } else if (!hasData) {
-    statusText.textContent = failure || '暂无行情，等待服务器更新';
+    statusText.textContent = failure || '暂无行情，等待下一次交易时段刷新';
   } else {
     const { tradeDate, stale } = activeSnapshot;
     const details = [];
@@ -357,7 +359,7 @@ function renderStatus() {
     statusText.textContent = details.join(' · ') || '行情已更新';
   }
   statusText.parentElement.dataset.ready = String(hasData && !failure && !activeSnapshot?.stale && !refreshing);
-  retryButton.hidden = !failure || refreshing || needsToken(connection);
+  retryButton.hidden = !failure || refreshing || needsToken(connection) || refreshSchedule(Date.now()).slot === null;
 }
 
 async function requestSnapshot(settings) {
@@ -370,14 +372,34 @@ async function requestSnapshot(settings) {
   return response.json();
 }
 
-async function refreshQuotes() {
-  if (refreshing) return;
-  if (needsToken(connection)) {
-    renderStatus();
-    return;
+function displaySnapshot(snapshot) {
+  const { updatedAt } = snapshot.data;
+  activeSnapshot = snapshot.data;
+  changes = snapshot.values;
+  const ranking = rankGroups(watchlist.groups, changes);
+  const history = advanceRankHistory(rankHistory, updatedAt, ranking);
+  if (history !== rankHistory) {
+    rankHistory = history;
+    writePreference(rankHistoryKey, JSON.stringify({ endpoint: connection.endpoint, history }));
   }
+  renderLastRefresh(changes.size ? updatedAt : null);
+  renderQuotes(ranking, Date.parse(updatedAt) === rankHistory?.updatedAt ? rankHistory : null);
+}
+
+function restoreSnapshot() {
+  if (needsToken(connection)) return;
+  try {
+    const saved = JSON.parse(readPreference(snapshotKey));
+    if (saved?.endpoint === connection.endpoint) displaySnapshot(readSnapshot(saved.data));
+  } catch {
+    // Invalid local data should not prevent the next scheduled refresh.
+  }
+}
+
+async function refreshQuotes(slot) {
+  if (refreshing || needsToken(connection) || slot === null || slot !== refreshSchedule(Date.now()).slot) return;
   const revision = connectionRevision;
-  lastRequestAt = Date.now();
+  lastRequestedSlot = slot;
   refreshing = true;
   renderStatus();
   try {
@@ -389,17 +411,11 @@ async function refreshQuotes() {
       failure = '服务器暂未提供更新行情';
       return;
     }
-    activeSnapshot = snapshot.data;
-    changes = snapshot.values;
     failure = '';
-    const ranking = rankGroups(watchlist.groups, changes);
-    const history = advanceRankHistory(rankHistory, updatedAt, ranking);
-    if (history !== rankHistory) {
-      rankHistory = history;
-      writePreference(rankHistoryKey, JSON.stringify({ endpoint: connection.endpoint, history }));
+    displaySnapshot(snapshot);
+    if (changes.size) {
+      writePreference(snapshotKey, JSON.stringify({ endpoint: connection.endpoint, data: snapshot.data }));
     }
-    renderLastRefresh(changes.size ? updatedAt : null);
-    renderQuotes(ranking, timestamp === rankHistory?.updatedAt ? rankHistory : null);
   } catch (error) {
     if (revision !== connectionRevision) return;
     const message = String(error);
@@ -410,19 +426,24 @@ async function refreshQuotes() {
   } finally {
     refreshing = false;
     if (revision === connectionRevision) renderStatus();
-    else void refreshQuotes();
+    else scheduleRefresh();
   }
 }
 
-function startPolling() {
-  clearInterval(intervalHandle);
-  intervalHandle = setInterval(refreshQuotes, refreshInterval);
-  void refreshQuotes();
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  const now = Date.now();
+  const { slot, next } = refreshSchedule(now);
+  const wait = Math.min(next === null ? Infinity : next - now, scheduleCheckInterval - now % scheduleCheckInterval);
+  refreshTimer = setTimeout(scheduleRefresh, wait);
+  if (slot !== null && slot !== lastRequestedSlot) void refreshQuotes(slot);
+  renderLastRefresh(changes.size ? activeSnapshot?.updatedAt : null);
+  renderStatus();
 }
 
-retryButton.addEventListener('click', refreshQuotes);
+retryButton.addEventListener('click', () => void refreshQuotes(refreshSchedule(Date.now()).slot));
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && Date.now() - lastRequestAt >= refreshInterval) void refreshQuotes();
+  if (!document.hidden) scheduleRefresh();
 });
 
 el('open-settings').addEventListener('click', () => {
@@ -461,14 +482,16 @@ el('settings-form').addEventListener('submit', (event) => {
   settingsDialog.close();
   if (changed) {
     connectionRevision += 1;
+    lastRequestedSlot = undefined;
     if (endpointChanged) rankHistory = readRankHistory(endpoint);
     activeSnapshot = null;
     changes = new Map();
     failure = '';
+    writePreference(snapshotKey, '');
     renderLastRefresh(null);
     renderQuotes();
   }
-  startPolling();
+  scheduleRefresh();
 });
 settingsDialog.addEventListener('close', () => {
   tokenInput.value = '';
@@ -483,7 +506,8 @@ if (isTauri()) {
 renderTitle();
 buildWatchlist();
 renderQuotes();
-if (activeGroup !== watchlist.groups[0]) {
+restoreSnapshot();
+if (activeGroup !== groupOrder[0]) {
   groupElements.get(activeGroup.id).card.scrollIntoView({ block: 'start', inline: 'nearest' });
 }
-startPolling();
+scheduleRefresh();
