@@ -125,6 +125,7 @@ let title = readPreference(titleKey)?.trim().slice(0, 60) || defaultTitle;
 let activeGroup = watchlist.groups.find((group) => group.id === readPreference(groupKey)) || watchlist.groups[0];
 let activeSnapshot = null;
 let changes = new Map();
+let previousChanges = {};
 let groupOrder = watchlist.groups;
 let refreshing = false;
 let failure = '';
@@ -202,9 +203,14 @@ function buildWatchlist() {
       identity.append(name, code);
       const value = document.createElement('span');
       value.className = 'stock-change';
-      row.append(identity, value);
+      const movement = document.createElement('span');
+      movement.className = 'stock-movement';
+      const metrics = document.createElement('span');
+      metrics.className = 'stock-metrics';
+      metrics.append(value, movement);
+      row.append(identity, metrics);
       stockList.append(row);
-      return value;
+      return { value, movement };
     });
     card.append(header, stockList);
     stockGrid.append(card);
@@ -263,6 +269,23 @@ function applyGroupOrder(ranking) {
   if (focusedTab && document.activeElement !== focusedTab) focusedTab.focus({ preventScroll: true });
 }
 
+function renderStockMovement(node, change, previous) {
+  const delta = Number.isFinite(change) && Number.isFinite(previous)
+    ? Number((change - previous).toFixed(2)) : null;
+  if (delta === null) {
+    node.textContent = '—';
+    node.title = '暂无上一轮可比较的涨幅';
+  } else if (delta === 0) {
+    node.textContent = '0.00';
+    node.title = '较上一轮涨幅持平';
+  } else {
+    const magnitude = Math.abs(delta).toFixed(2);
+    node.textContent = `${delta > 0 ? '↑+' : '↓−'}${magnitude}`;
+    node.title = `较上一轮${delta > 0 ? '上升' : '下降'} ${magnitude} 个百分点`;
+  }
+  node.setAttribute('aria-label', node.title);
+}
+
 function renderQuotes(ranking = rankGroups(watchlist.groups, changes), history = null) {
   for (const { group, value, count } of ranking) {
     const { button, tabValue, cardValue, movement, stockValues } = groupElements.get(group.id);
@@ -281,12 +304,13 @@ function renderQuotes(ranking = rankGroups(watchlist.groups, changes), history =
 
     group.stocks.forEach((stock, index) => {
       const change = changes.get(stock.code);
-      const node = stockValues[index];
+      const { value, movement } = stockValues[index];
       const missing = !Number.isFinite(change);
-      node.textContent = formatChange(change);
-      node.classList.toggle('missing', missing);
-      if (missing) node.title = '暂无有效报价';
-      else node.removeAttribute('title');
+      value.textContent = formatChange(change);
+      value.classList.toggle('missing', missing);
+      if (missing) value.title = '暂无有效报价';
+      else value.removeAttribute('title');
+      renderStockMovement(movement, change, previousChanges[stock.code]);
     });
   }
   applyGroupOrder(ranking);
@@ -306,6 +330,11 @@ function marketDate(timestamp) {
   if (!Number.isFinite(date.getTime())) return null;
   const parts = Object.fromEntries(tradeDateFormatter.formatToParts(date).map(({ type, value }) => [type, value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function snapshotTradeDate({ tradeDate, updatedAt }) {
+  // Some providers supply only the collection time during the trading session.
+  return tradeDate || (typeof updatedAt === 'string' ? marketDate(updatedAt) : null);
 }
 
 function renderLastRefresh(updatedAt) {
@@ -330,11 +359,12 @@ function readSnapshot(data) {
     throw new Error('行情格式错误');
   }
 
+  const tradeDate = snapshotTradeDate(data);
   const values = new Map();
   for (const [code, quote] of Object.entries(data.quotes)) {
     if (!/^\d{6}$/.test(code) || quote?.stale || !Number.isFinite(quote?.changePct)) continue;
     const date = quote.tradeDate || (quote.quotedAt ? marketDate(quote.quotedAt) : null);
-    if (date && data.tradeDate && date !== data.tradeDate) continue;
+    if (date && tradeDate && date !== tradeDate) continue;
     values.set(code, quote.changePct);
   }
   return { data, values };
@@ -390,7 +420,11 @@ function restoreSnapshot() {
   if (needsToken(connection)) return;
   try {
     const saved = JSON.parse(readPreference(snapshotKey));
-    if (saved?.endpoint === connection.endpoint) displaySnapshot(readSnapshot(saved.data));
+    if (saved?.endpoint === connection.endpoint) {
+      const snapshot = readSnapshot(saved.data);
+      previousChanges = saved.previousChanges ?? {};
+      displaySnapshot(snapshot);
+    }
   } catch {
     // Invalid local data should not prevent the next scheduled refresh.
   }
@@ -406,15 +440,20 @@ async function refreshQuotes(slot) {
     const snapshot = readSnapshot(await requestSnapshot(connection));
     if (revision !== connectionRevision) return;
     const { updatedAt } = snapshot.data;
-    const timestamp = Date.parse(updatedAt);
-    if (changes.size && (!snapshot.values.size || timestamp < Date.parse(activeSnapshot?.updatedAt))) {
+    const timestamp = typeof updatedAt === 'string' ? Date.parse(updatedAt) : NaN;
+    const lastTimestamp = Date.parse(activeSnapshot?.updatedAt);
+    if (changes.size && (!snapshot.values.size || !Number.isFinite(timestamp) || timestamp < lastTimestamp)) {
       failure = '服务器暂未提供更新行情';
       return;
     }
+    const tradeDate = snapshotTradeDate(snapshot.data);
+    const lastTradeDate = activeSnapshot && snapshotTradeDate(activeSnapshot);
+    if (tradeDate !== lastTradeDate) previousChanges = {};
+    else if (timestamp > lastTimestamp) previousChanges = Object.fromEntries(changes);
     failure = '';
     displaySnapshot(snapshot);
     if (changes.size) {
-      writePreference(snapshotKey, JSON.stringify({ endpoint: connection.endpoint, data: snapshot.data }));
+      writePreference(snapshotKey, JSON.stringify({ endpoint: connection.endpoint, data: snapshot.data, previousChanges }));
     }
   } catch (error) {
     if (revision !== connectionRevision) return;
@@ -486,6 +525,7 @@ el('settings-form').addEventListener('submit', (event) => {
     if (endpointChanged) rankHistory = readRankHistory(endpoint);
     activeSnapshot = null;
     changes = new Map();
+    previousChanges = {};
     failure = '';
     writePreference(snapshotKey, '');
     renderLastRefresh(null);
